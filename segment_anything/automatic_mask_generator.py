@@ -25,7 +25,7 @@ from .utils.amg import (
     is_box_near_crop_edge,
     mask_to_rle_pytorch,
     remove_small_regions,
-    remove_large_regions,
+    remove_big_regions,
     rle_to_mask,
     uncrop_boxes_xyxy,
     uncrop_masks,
@@ -49,7 +49,7 @@ class SamAutomaticMaskGenerator:
         crop_n_points_downscale_factor: int = 1,
         point_grids: Optional[List[np.ndarray]] = None,
         min_mask_region_area: int = 0,
-        max_mask_region_area: int = 60,
+        max_mask_region_area: int = 0,
         output_mode: str = "binary_mask",
     ) -> None:
         """
@@ -91,10 +91,9 @@ class SamAutomaticMaskGenerator:
           min_mask_region_area (int): If >0, postprocessing will be applied
             to remove disconnected regions and holes in masks with area smaller
             than min_mask_region_area. Requires opencv.
-          min_mask_region_area (int): If >0, postprocessing will be applied
-          to remove disconnected regions and holes in masks with area bigger
-          than max_mask_region_area. Requires opencv.
-            
+          max_mask_region_area (int): If >0, postprocessing will be applied
+            to remove disconnected regions and holes in masks with area greater
+            than max_mask_region_area. Requires opencv.
           output_mode (str): The form masks are returned in. Can be 'binary_mask',
             'uncompressed_rle', or 'coco_rle'. 'coco_rle' requires pycocotools.
             For large resolutions, 'binary_mask' may consume large amounts of
@@ -123,7 +122,10 @@ class SamAutomaticMaskGenerator:
         if output_mode == "coco_rle":
             from pycocotools import mask as mask_utils  # type: ignore # noqa: F401
 
-        if (min_mask_region_area > 0) & (max_mask_region_area > 0):
+        if min_mask_region_area > 0:
+            import cv2  # type: ignore # noqa: F401
+            
+        if max_mask_region_area > 0:
             import cv2  # type: ignore # noqa: F401
 
         self.predictor = SamPredictor(model)
@@ -176,13 +178,14 @@ class SamAutomaticMaskGenerator:
                 self.min_mask_region_area,
                 max(self.box_nms_thresh, self.crop_nms_thresh),
             )
+
+        # Filter great disconnected regions and holes in masks
         if self.max_mask_region_area > 0:
-            mask_data = self.postprocess_large_regions(
+            mask_data = self.postprocess_small_regions(
                 mask_data,
                 self.max_mask_region_area,
                 max(self.box_nms_thresh, self.crop_nms_thresh),
             )
-
         # Encode masks
         if self.output_mode == "coco_rle":
             mask_data["segmentations"] = [coco_encode_rle(rle) for rle in mask_data["rles"]]
@@ -383,13 +386,15 @@ class SamAutomaticMaskGenerator:
         mask_data.filter(keep_by_nms)
 
         return mask_data
-    
+
+
+
     @staticmethod
-    def postprocess_large_regions(
+    def postprocess_big_regions(
         mask_data: MaskData, max_area: int, nms_thresh: float
     ) -> MaskData:
         """
-        Removes large disconnected regions and holes in masks, then reruns
+        Removes big disconnected regions and holes in masks, then reruns
         box NMS to remove any new duplicates.
 
         Edits mask_data in place.
@@ -399,15 +404,15 @@ class SamAutomaticMaskGenerator:
         if len(mask_data["rles"]) == 0:
             return mask_data
 
-        # Filter large disconnected regions and holes
+        # Filter small disconnected regions and holes
         new_masks = []
         scores = []
         for rle in mask_data["rles"]:
             mask = rle_to_mask(rle)
 
-            mask, changed = remove_large_regions(mask, max_area, mode="holes")
+            mask, changed = remove_big_regions(mask, max_area, mode="holes")
             unchanged = not changed
-            mask, changed = remove_large_regions(mask, max_area, mode="islands")
+            mask, changed = remove_big_regions(mask, max_area, mode="islands")
             unchanged = unchanged and not changed
 
             new_masks.append(torch.as_tensor(mask).unsqueeze(0))
